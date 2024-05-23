@@ -1,5 +1,6 @@
 import boto3
 import os
+import requests
 
 alb_arn                 = os.environ['alb_arn']
 target_group_arn        = os.environ['target_group_arn']
@@ -20,16 +21,16 @@ def get_registered_targets(target_group_arn):
     # Return the list of registered targets
     return registered_targets
 
-def get_instance_info(instance_id):
-    # Get the instance info
-    instance_info = ec2.describe_instances(
+def get_instance_ip(instance_id):
+    # Get the instance IP
+    instance_ip = ec2.describe_instances(
         InstanceIds=[
             instance_id
         ]
-    )['Reservations'][0]['Instances'][0]
+    )['Reservations'][0]['Instances'][0]['PrivateIpAddress']
 
-    # Return the instance info
-    return instance_info
+    # Return the instance IP
+    return instance_ip
 
 def get_lambda_url(lambda_name):
     # Get the lambda URL
@@ -51,19 +52,16 @@ def get_alb_url(alb_arn):
     # Return the ALB URL
     return alb_url
 
-def check_target(target_id):
-    # Check the health of the target
-    health_check_response = elbv2.describe_target_health(
-        TargetGroupArn=target_group_arn,
-        Targets=[
-            {
-                'Id': target_id
-            }
-        ]
-    )['TargetHealthDescriptions'][0]['TargetHealth']['State']
-
-    # Return the health check response
-    return health_check_response
+def check_target(url):
+    # Check the target health
+    health_check_response = requests.get(url)
+    # ensure health check response body contains os.environ['health_check_body_value']
+    if os.environ['health_check_body_value'] in health_check_response.text:
+        print('Target is healthy.')
+        return True
+    else:
+        print('Target is unhealthy.')
+        return False
 
 def get_target_type(target_group_arn):
     # Get the target type
@@ -83,16 +81,26 @@ def lambda_handler(event, context):
     for target in registered_targets:
         print(target['Target']['Id'])
         if target_type == 'lambda':
-            url = get_lambda_url(target['Target']['Id'])
-            print(lambda_url)
+            host_path = get_lambda_url(target['Target']['Id'])
         elif target_type == 'instance':
-            url = get_instance_info(target['Target']['Id'])
-            print(instance_info)
+            host_path = get_instance_ip(target['Target']['Id'])
         elif target_type == 'ip':
-            url = target['Target']['Id']
-            print(target['Target']['Id'])
+            host_path = target['Target']['Id']
         else:
             print('Unsupported target type.')
+
+        url = f"{os.environ['health_check_protocol'].lower()}://{host_path}:{os.environ['health_check_port']}{os.environ['health_check_path']}"
+        if not check_target(url):
+            print(f"Target {target['Target']['Id']} is unhealthy. Deregistering...")
+            elbv2.deregister_targets(
+                TargetGroupArn=target_group_arn,
+                Targets=[
+                    {
+                        'Id': target['Target']['Id']
+                    }
+                ]
+            )
+
     print(registered_targets)
     for target in registered_targets:
         print(target['Target']['Id'])
